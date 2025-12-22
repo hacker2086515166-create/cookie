@@ -1,0 +1,14 @@
+{
+  "name": "persistent-message-sender-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "ws": "^8.18.3",
+    "uuid": "^10.0.0",
+    "fca-mafiya": "^2.0.3"
+  }
+}
