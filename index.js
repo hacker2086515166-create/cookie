@@ -1,12 +1,20 @@
 /**
- * Group Name Locker Bot (Cookie Login Version)
+ * Group Name Locker Bot - Render Safe Version
  * Developer: Ayush
- * Fast reset + spam prevention + instant event detect
  */
 
 const login = require("ws3-fca");
 const fs = require("fs");
 const express = require("express");
+
+// ---------------- GLOBAL ERROR HANDLER ----------------
+process.on("unhandledRejection", err => {
+  console.error("UNHANDLED REJECTION:", err);
+});
+
+process.on("uncaughtException", err => {
+  console.error("UNCAUGHT EXCEPTION:", err);
+});
 
 // ---------------- COOKIE PARSER ----------------
 function parseCookieString(str) {
@@ -17,8 +25,8 @@ function parseCookieString(str) {
     .map(pair => {
       const idx = pair.indexOf("=");
       return {
-        key: pair.substr(0, idx),
-        value: pair.substr(idx + 1),
+        key: pair.substring(0, idx),
+        value: pair.substring(idx + 1),
         domain: ".facebook.com",
         path: "/",
         httpOnly: true,
@@ -28,81 +36,81 @@ function parseCookieString(str) {
 }
 
 // ---------------- LOAD COOKIES ----------------
-let cookies;
-try {
-  const raw = fs.readFileSync("cookie.txt", "utf8");
-  cookies = parseCookieString(raw);
-  console.log("✅ Cookies loaded");
-} catch (e) {
-  console.error("❌ cookie.txt missing");
-  process.exit(1);
+let cookieRaw;
+
+// Priority 1: Render ENV variable
+if (process.env.COOKIE) {
+  console.log("✅ Using COOKIE from Render ENV");
+  cookieRaw = process.env.COOKIE;
 }
+// Priority 2: cookie.txt file
+else {
+  try {
+    cookieRaw = fs.readFileSync("cookie.txt", "utf8");
+    console.log("✅ Using cookie.txt file");
+  } catch (e) {
+    console.error("❌ No COOKIE provided");
+    process.exit(1);
+  }
+}
+
+const cookies = parseCookieString(cookieRaw);
 
 // ---------------- GROUP CONFIG ----------------
 const GROUP_THREAD_ID = "1817176635658370";
 const LOCKED_GROUP_NAME = "LOCKED NAME HERE";
 
-// ---------------- STATE VARS ----------------
-let lastTitleCheck = {};
-let resetTimeout = null;
+// ---------------- STATE ----------------
+let lastCheck = 0;
 let isProcessing = false;
+let resetTimeout = null;
 
 // ---------------- EXPRESS KEEP ALIVE ----------------
 const app = express();
-app.get("/", (req, res) => res.send("Group Locker Bot Alive"));
+app.get("/", (req, res) => res.send("Group Locker Bot Running"));
 app.listen(process.env.PORT || 3000);
 
-// ---------------- SAFE SET TITLE ----------------
-function safeSetTitle(api, title, threadID, cb) {
-  api.setTitle(title, threadID, (err) => {
+// ---------------- SAFE TITLE SET ----------------
+function safeSetTitle(api, title) {
+  api.setTitle(title, GROUP_THREAD_ID, (err) => {
     if (err) {
       console.error("❌ setTitle error:", err);
-      if (cb) cb(err);
     } else {
-      console.log("✅ Title set:", title);
-      if (cb) cb(null);
+      console.log("✅ Group name locked successfully");
     }
   });
 }
 
-// ---------------- CHECK + RESET ----------------
-function checkAndResetTitle(api, forceCheck = false) {
+// ---------------- CHECK FUNCTION ----------------
+function checkAndReset(api, force = false) {
   if (isProcessing) return;
 
   const now = Date.now();
+  if (!force && now - lastCheck < 2000) return;
 
-  if (!forceCheck && lastTitleCheck[GROUP_THREAD_ID]) {
-    if (now - lastTitleCheck[GROUP_THREAD_ID] < 2000) return;
-  }
-
-  lastTitleCheck[GROUP_THREAD_ID] = now;
+  lastCheck = now;
 
   api.getThreadInfo(GROUP_THREAD_ID, (err, info) => {
-    if (err) return;
+    if (err || !info) return;
 
-    const currentName = info?.name || info?.threadName || "";
+    const current = info.name || info.threadName || "";
 
-    if (currentName !== LOCKED_GROUP_NAME) {
+    if (current !== LOCKED_GROUP_NAME) {
+      console.log("⚠ Name changed, resetting...");
+
       if (resetTimeout) clearTimeout(resetTimeout);
 
       resetTimeout = setTimeout(() => {
         isProcessing = true;
 
         api.getThreadInfo(GROUP_THREAD_ID, (err2, info2) => {
-          if (err2) {
-            isProcessing = false;
-            return;
+          if (!err2 && info2) {
+            const verify = info2.name || info2.threadName || "";
+            if (verify !== LOCKED_GROUP_NAME) {
+              safeSetTitle(api, LOCKED_GROUP_NAME);
+            }
           }
-
-          const verified = info2?.name || info2?.threadName || "";
-
-          if (verified !== LOCKED_GROUP_NAME) {
-            safeSetTitle(api, LOCKED_GROUP_NAME, GROUP_THREAD_ID, () => {
-              isProcessing = false;
-            });
-          } else {
-            isProcessing = false;
-          }
+          isProcessing = false;
         });
 
       }, 2000);
@@ -110,29 +118,16 @@ function checkAndResetTitle(api, forceCheck = false) {
   });
 }
 
-// ---------------- POLLING FALLBACK ----------------
-function startPollingFallback(api, interval = 30000) {
-  function loop() {
-    checkAndResetTitle(api);
-    setTimeout(loop, interval);
-  }
-  loop();
-}
-
 // ---------------- EVENT LISTENER ----------------
-function startEventListener(api) {
+function startListener(api) {
   api.listenMqtt((err, event) => {
     if (err || !event) return;
 
-    if (event.type === "event" && event.logMessageType) {
-      const t = event.logMessageType.toString();
+    if (event.type === "event" && event.threadID == GROUP_THREAD_ID) {
+      if (event.logMessageType &&
+          event.logMessageType.includes("thread")) {
 
-      const nameChange =
-        t.includes("thread") &&
-        (t.includes("name") || t.includes("title"));
-
-      if (nameChange && event.threadID == GROUP_THREAD_ID) {
-        setTimeout(() => checkAndResetTitle(api), 500);
+        setTimeout(() => checkAndReset(api), 500);
       }
     }
   });
@@ -141,22 +136,17 @@ function startEventListener(api) {
 // ---------------- LOGIN ----------------
 login({ cookies }, (err, api) => {
   if (err) {
-    console.error("❌ Login failed:", err);
+    console.error("❌ LOGIN FAILED:", err);
     return;
   }
 
-  console.log("✅ Cookie login success");
+  console.log("✅ LOGIN SUCCESS");
+  console.log("🚀 Group Name Locker Activated");
 
-  // save fresh appstate backup
-  api.getAppState((err, state) => {
-    if (!err) {
-      fs.writeFileSync("appstate.json", JSON.stringify(state, null, 2));
-      console.log("✅ Backup appstate saved");
-    }
-  });
+  checkAndReset(api, true);
+  startListener(api);
 
-  // start bot
-  checkAndResetTitle(api, true);
-  startEventListener(api);
-  startPollingFallback(api, 30000);
+  setInterval(() => {
+    checkAndReset(api);
+  }, 30000);
 });
